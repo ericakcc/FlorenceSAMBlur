@@ -1,0 +1,38 @@
+# 模型目錄
+my_models/
+video_frames/
+
+# 視頻文件
+*.mp4
+
+# Python相關
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE相關
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系統相關
+.DS_Store
+Thumbs.db 
