@@ -6,6 +6,8 @@ from PIL import Image
 import torch
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoProcessor
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 # 設定模型快取資料夾
 MODEL_NAME = "microsoft/Florence-2-large-ft"
@@ -25,6 +27,12 @@ processor = AutoProcessor.from_pretrained(
     trust_remote_code=True
 )
 
+sam2_checkpoint = "/home/ericakcc/segment-anything-2/checkpoints/sam2.1_hiera_small.pt"
+model_cfg = "configs/sam2.1/sam2.1_hiera_s.yaml"
+
+sam2_model = build_sam2(model_cfg, sam2_checkpoint, device='cuda')
+sam2_predictor = SAM2ImagePredictor(sam2_model)
+
 def find_all_faces(image):
     """尋找圖片中的所有人臉並標示出來"""
     PROMPT = "<OD>"
@@ -42,7 +50,6 @@ def find_all_faces(image):
     text_generations = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
     results = processor.post_process_generation(text_generations, task=task_type, image_size=(image.width, image.height))
 
-    print(results)
     raw_list = [bbox for bbox, label in zip(results[task_type]['bboxes'], results[task_type]['labels']) if label == 'human face']
 
     # 繪製偵測結果
@@ -130,6 +137,45 @@ def filter_face_boxes(boxes, image_size, max_size_ratio=0.3, max_iou=0.3, aspect
     
     return filtered_boxes
 
+def is_overlapping(box1, box2, threshold=0.7):
+    # Unpack coordinates
+    x1_min, y1_min, x1_max, y1_max = box1
+    x2_min, y2_min, x2_max, y2_max = box2
+    
+    # Calculate the overlap area
+    x_overlap = max(0, min(x1_max, x2_max) - max(x1_min, x2_min))
+    y_overlap = max(0, min(y1_max, y2_max) - max(y1_min, y2_min))
+    
+    # Calculate the area of each box
+    area1 = (x1_max - x1_min) * (y1_max - y1_min)
+    area2 = (x2_max - x2_min) * (y2_max - y2_min)
+    overlap_area = x_overlap * y_overlap
+    
+    # Calculate the minimum area of the two boxes
+    min_area = min(area1, area2)
+    
+    # Check if the overlap area is at least the specified percentage of the smaller box's area
+    return overlap_area >= threshold * min_area
+
+def filter_boxes(initial_boxes, new_boxes):
+    filtered_boxes = []
+    
+    for box in initial_boxes:
+        if not any(is_overlapping(box, new_box) for new_box in new_boxes):
+            filtered_boxes.append(box)
+            
+    return filtered_boxes
+
+
+def find_all_passerbys(image):
+    raw_list, _ = find_all_faces(image)
+    speaker_face_list, _ = find_main_speakers(image)
+    
+    filtered_boxes = filter_boxes(raw_list, speaker_face_list)
+    
+    return filtered_boxes
+
+
 def find_main_speakers(image):
     """尋找圖片中的主要發言者人臉"""
     PROMPT = "<CAPTION_TO_PHRASE_GROUNDING> human face (main speaker)"
@@ -146,7 +192,6 @@ def find_main_speakers(image):
 
     text_generations = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
     results = processor.post_process_generation(text_generations, task=task_type, image_size=(image.width, image.height))
-    print(results)
     
     # 先篩選出主要發言者的清單
     speaker_face_list = [bbox for bbox, label in zip(results[task_type]['bboxes'], results[task_type]['labels']) if label == 'human face']
@@ -173,6 +218,26 @@ def find_main_speakers(image):
     return filtered_faces, fig
 
 
+def get_mask_withSAM2(image, bboxes):
+    """使用 SAM2 生成路人遮罩"""
+    # 先設定圖片
+    sam2_predictor.set_image(np.array(image))
+    
+    masks = []
+    for bbox in bboxes:
+        x1, y1, x2, y2 = bbox
+        input_box = np.array([x1, y1, x2, y2])
+        
+        # 使用正確的 SAM2 預測 API
+        mask, scores, _ = sam2_predictor.predict(
+            point_coords=None,
+            point_labels=None,
+            box=input_box[None, :],
+            multimask_output=False
+        )
+        masks.append(mask[0])  # 只取第一個遮罩，因為 multimask_output=False
+    return masks
+
 def main():
     """測試主程式"""
     # 創建輸出資料夾
@@ -195,14 +260,42 @@ def main():
     # faces_fig.savefig(os.path.join(output_dir, "all_faces.png"))
     # plt.close(faces_fig)
 
-    print("\n偵測主要發言者...")
-    speakers, speakers_fig = find_main_speakers(image)
-    print("主要發言者座標:", speakers)
+    # print("\n偵測主要發言者...")
+    # speakers, speakers_fig = find_main_speakers(image)
+    # print("主要發言者座標:", speakers)
     
-    # 保存主要發言者偵測結果
-    speakers_fig.savefig(os.path.join(output_dir, "main_speakers.png"))
-    plt.close(speakers_fig)
+    # # 保存主要發言者偵測結果
+    # speakers_fig.savefig(os.path.join(output_dir, "main_speakers.png"))
+    # plt.close(speakers_fig)
 
+    print("\n偵測路人...")
+    passerbys = find_all_passerbys(image)
+    print("路人座標:", passerbys)
+    
+    # 生成路人遮罩
+    masks = get_mask_withSAM2(image, passerbys)
+    
+    # 將所有遮罩合併成一個，確保使用相同的資料型態
+    combined_mask = np.zeros_like(masks[0], dtype=bool)
+    for mask in masks:
+        combined_mask = np.logical_or(combined_mask, mask.astype(bool))
+    
+    # 將圖片轉換為numpy陣列
+    image_array = np.array(image)
+    
+    # 創建一個半透明的藍色遮罩
+    overlay = image_array.copy()
+    overlay[combined_mask] = [0, 0, 255]  # 藍色
+    
+    # 混合原圖和遮罩
+    alpha = 0.5  # 透明度
+    result = image_array.copy()
+    result[combined_mask] = (alpha * image_array[combined_mask] + (1 - alpha) * overlay[combined_mask]).astype(np.uint8)
+    
+    # 儲存結果
+    result_image = Image.fromarray(result)
+    result_image.save(os.path.join(output_dir, "masked_result.png"))
+    print("已儲存遮罩結果到:", os.path.join(output_dir, "masked_result.png"))
 
 if __name__ == "__main__":
     main()
