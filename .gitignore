@@ -1,11 +1,11 @@
-# 模型目錄
+# Dirs
 my_models/
 video_frames/
 
-# 視頻文件
+# Video
 *.mp4
 
-# Python相關
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -27,12 +27,12 @@ var/
 .installed.cfg
 *.egg
 
-# IDE相關
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# 系統相關
+# System
 .DS_Store
 Thumbs.db 
